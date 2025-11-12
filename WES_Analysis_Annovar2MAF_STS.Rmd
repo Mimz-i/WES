@@ -1,0 +1,977 @@
+---
+title: "Annovar to MAF after strick filtering (PASS_AD_AF) - WES"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+This Notebook has
+
+```{r}
+library(tidyverse)
+library(dplyr)
+library(data.table)
+```
+
+Individual annovar output files can be read using `read_tsv`. We suggest reading an example file to test out your filtering steps before applying to all files.
+
+```{r}
+## find all annovar output files
+anno_files <- list.files(".",pattern="_multianno.txt",recursive = TRUE)
+test <- read_tsv(anno_files[1])
+test
+genes_info <- "NoRep_GeneList_500_TCGA_Misvik.csv"
+# genes_of_interest <- "gene_list_misvik_drug_screen.csv"
+# genes_of_interest <- read_csv("gene_list_misvik_drug_screen.csv") %>% pull(GENE)
+
+## (Optional) create genes of interest vector manually
+#genes_of_interest <- c("BRCA1","BRCA2","TP53")
+
+
+```
+
+Once we have decided on filtering criteria, these can be implemented using the `filter` function. The resulting table can be written out as a new annovar-format table. The code chunk belows implments the set of filters
+
+-   e.g. filter to genes belonging to pathways of interest
+-   keep only exonic/splicing genes
+-   less than 0.01 frequency in EXaC
+
+```{r}
+
+for(i in 1:length(anno_files)){
+  
+  annov <- read_tsv(anno_files[i],show_col_types = FALSE)
+  message("Filtering file: ", anno_files[i])
+  new_file <- gsub("multianno","multianno_forMAF",anno_files[i])
+
+  annov %>% 
+    filter(Func.refGene %in% c("exonic","exonic;splicing", "splicing")) %>%
+    filter(!ExonicFunc.refGene %in% c("synonymous SNV")) %>% 
+#    filter(Gene.refGene %in% genes_of_interest) %>% 
+    filter(is.na(ExAC_ALL) | ExAC_ALL < 0.01) %>%
+    write_tsv(new_file)
+  
+}
+
+
+```
+
+Once all the files have been filtered, the `maftools` package can read the filtered files and produce a `maf` file for further plotting and analysis.
+
+```{r}
+library(maftools)
+
+# find your ANNOVAR->MAF inputs
+manno_files <- list.files(".",pattern="_forMAF.txt",full.names = TRUE, recursive = TRUE)
+
+
+for(i in 1:length(manno_files)){
+  out <- gsub("_multianno_forMAF.txt",".maf",manno_files[i])
+  tmp <- annovarToMaf(manno_files[i], refBuild="hg38")
+  write.table(tmp, file=out, sep="\t",row.names=FALSE,quote=FALSE)
+}
+
+
+
+```
+
+```{r}
+
+library(maftools)
+
+## (this chunk REPLACES your current 'big_maf <- merge_mafs(...)' line)
+drop_pat <- "^ARPE[-_]?19$"
+
+maf_files <- list.files(".", pattern = "\\.maf$", full.names = TRUE, recursive = TRUE)
+maf_files <- maf_files[!grepl(drop_pat, basename(maf_files), ignore.case = TRUE)]
+
+big_maf <- merge_mafs(maf_files)
+
+## Post-merge guard (version-safe)
+tsb      <- getSampleSummary(big_maf)$Tumor_Sample_Barcode
+to_drop  <- tsb[grepl(drop_pat, tsb, ignore.case = TRUE)]
+
+if (length(to_drop)) {
+  # Check whether this maftools has 'exclude' arg
+  has_exclude <- "exclude" %in% names(formals(maftools::subsetMaf))
+  if (has_exclude) {
+    big_maf <- subsetMaf(maf = big_maf, tsb = to_drop, exclude = TRUE)
+  } else {
+    keep_tsb <- setdiff(tsb, to_drop)
+    stopifnot(length(keep_tsb) > 0)  # avoid empty set
+    big_maf <- subsetMaf(maf = big_maf, tsb = keep_tsb)
+  }
+}
+
+## sanity-check
+stopifnot(!any(grepl(drop_pat,
+                     getSampleSummary(big_maf)$Tumor_Sample_Barcode,
+                     ignore.case = TRUE)))
+
+#big_maf <- merge_mafs(list.files(".",pattern = ".maf",full.names = TRUE, recursive = TRUE))
+
+sarc = tcgaLoad(study = "SARC")
+
+plotmafSummary(big_maf,showBarcodes = TRUE,fs = 1,titleSize = 1.3,textSize = 0.7,top=20)
+
+```
+
+```{r}
+# titv function classifies SNPs into Transitions and Transversions and returns a list of summarized tables in various ways. Summarized data can also be visualized as a boxplot showing overall distribution of six different conversions and as a stacked barplot showing fraction of conversions in each sample
+
+bigmaf.titv = titv(maf = big_maf, plot = FALSE, useSyn = TRUE)
+
+#plot titv summary
+plotTiTv(res = bigmaf.titv, showBarcodes = TRUE, sampleOrder = c("UPS1", "UPS2", "UPS3", "DDLPS", "LMS1", "LMS2", "MFS1", "MFS2", "MFS3"))
+```
+
+```{r}
+# oncoplot for top 50 mutated genes
+oncoplot(big_maf, top = 50, titleText = "WES STS Top 50 Mutated Genes", sepwd_genes = 2, sepwd_samples = 3, fontSize = 0.9, gene_mar = 7, drawColBar = FALSE, drawRowBar = FALSE, barcode_mar = 5, showTumorSampleBarcodes = TRUE, barcodeSrt = 40, legend_height = 2.5, legendFontSize = 1, anno_height = 2, sampleOrder = c("UPS1", "UPS2", "UPS3", "DDLPS", "LMS1", "LMS2", "MFS1", "MFS2", "MFS3"), annotationFontSize = 1)
+
+```
+
+```{r}
+oncoplot(big_maf, top = 50, fontSize = 0.6, draw_titv = TRUE, clinicalFeatures = 'Tumor_Sample_Barcode', legendFontSize = 1.2, sampleOrder = c("UPS1", "UPS2", "UPS3", "DDLPS", "LMS1", "LMS2", "MFS1", "MFS2", "MFS3", "ARPE-19"), annotationOrder = c("UPS1", "UPS2", "UPS3", "DDLPS", "LMS1", "LMS2", "MFS1", "MFS2", "MFS3"), annotationFontSize = 1)
+
+```
+
+```{r}
+# oncoplot summarizing oncogenic signalling pathways from a curated list of 10 signalling pathways
+oncoplot(maf = big_maf, pathways = "sigpw", topPathways = 10, titleText = "WES STS Oncogenic Signalling Pathways", sepwd_genes = 2, sepwd_samples = 3, fontSize = 0.8, gene_mar = 7, drawColBar = FALSE, drawRowBar = FALSE, barcode_mar = 5, showTumorSampleBarcodes = TRUE, barcodeSrt = 40, legend_height = 2.5, legendFontSize = 1, anno_height = 2, sampleOrder = c("UPS1", "UPS2", "UPS3", "DDLPS", "LMS1", "LMS2", "MFS1", "MFS2", "MFS3"), annotationFontSize = 1)
+
+```
+
+
+
+```{r}
+
+# oncoplot summarizing known driver genes classified by their biological processes
+oncoplot(maf = big_maf, pathways = "sigpw", topPathways = 20, titleText = "WES STS Oncogenic Signalling Pathways", sepwd_genes = 2, sepwd_samples = 3, fontSize = 0.8, gene_mar = 15, drawColBar = FALSE, drawRowBar = FALSE, barcode_mar = 5, showTumorSampleBarcodes = TRUE, barcodeSrt = 40, legend_height = 2.5, legendFontSize = 1, anno_height = 2, SampleNamefontSize = 1, sortByMutation = TRUE, sampleOrder = c("UPS1", "UPS2", "UPS3", "DDLPS", "LMS1", "LMS2", "MFS1", "MFS2", "MFS3"), annotationFontSize = 1, pwLineCol = TRUE)
+
+```
+
+
+
+```{r}
+pathways = data.frame(
+  Genes = c(
+    "CUL1",
+    "NOTCH3",
+    "CNTN6",
+    "CTBP2",
+    "JAG2",
+    "NCOR2",
+    "NOTCH1",
+    "ERBB4",
+    "RASGRP2",
+    "SHC2",
+    "FGFR1",
+    "PDGFRB",
+    "RAPGEF2",
+    "SPRED1",
+    "FAT4",
+    "HMCN1",
+    "PTPN14",
+    "TEAD3"
+  ),
+  Pathway = rep(c(
+    "NOTCH", "RTK-RAS", "Hippo"), c(7, 7, 4)),
+  stringsAsFactors = FALSE
+)
+
+head(pathways)
+
+oncoplot(maf = big_maf, pathways = pathways, sepwd_genes = 2, sepwd_samples = 3, fontSize = 1, gene_mar = 7, drawColBar = FALSE, drawRowBar = FALSE, barcode_mar = 5, showTumorSampleBarcodes = TRUE, barcodeSrt = 40, legend_height = 2.5, legendFontSize = 1, anno_height = 2, sampleOrder = c("UPS1", "UPS2", "UPS3", "DDLPS", "LMS1", "LMS2", "MFS1", "MFS2", "MFS3"), annotationFontSize = 1)
+```
+
+
+```{r}
+pathways = data.frame(
+  Genes = c(
+    "CUL1",
+    "NOTCH3",
+    "CNTN6",
+    "CTBP2",
+    "JAG2",
+    "NCOR2",
+    "NOTCH1"
+  ),
+  Pathway = rep(c(
+    "NOTCH"), c(7)),
+  stringsAsFactors = FALSE
+)
+
+head(pathways)
+
+oncoplot(maf = big_maf, pathways = pathways, sepwd_genes = 2, sepwd_samples = 3, fontSize = 0.8, gene_mar = 7, drawColBar = FALSE, drawRowBar = FALSE, barcode_mar = 5, showTumorSampleBarcodes = TRUE, barcodeSrt = 40, legend_height = 2.5, legendFontSize = 1, anno_height = 2, sampleOrder = c("UPS1", "UPS2", "UPS3", "DDLPS", "LMS1", "LMS2", "MFS1", "MFS2", "MFS3"), annotationFontSize = 1)
+```
+
+
+
+```{r}
+# oncoplot summarizing known driver genes classified by their biological processes
+oncoplot(maf = big_maf, pathways = "smgbp", topPathways = 18, titleText = "WES STS Known Driver Genes by BP", sepwd_genes = 2, sepwd_samples = 3, fontSize = 0.8, gene_mar = 15, drawColBar = FALSE, drawRowBar = FALSE, barcode_mar = 5, showTumorSampleBarcodes = TRUE, barcodeSrt = 40, legend_height = 2.5, legendFontSize = 1, anno_height = 2, SampleNamefontSize = 1, sortByMutation = TRUE, sampleOrder = c("UPS1", "UPS2", "UPS3", "DDLPS", "LMS1", "LMS2", "MFS1", "MFS2", "MFS3"), annotationFontSize = 1, pwLineCol = FALSE)
+
+```
+
+```{r}
+# Lollipop plots for amino acid changes/isoforms
+lollipopPlot(
+  big_maf,
+  gene = 'TP53',
+  AACol = 'aaChange',
+  showMutationRate = TRUE,
+  labelPos = "all")
+
+lollipopPlot(
+  big_maf,
+  gene = 'FGFR1',
+  AACol = 'aaChange',
+  showMutationRate = TRUE,
+  labelPos = "all")
+
+lollipopPlot(
+  big_maf,
+  gene = 'TP53',
+  AACol = 'aaChange',
+  showMutationRate = TRUE,
+  refSeqID = 'NM_001126115',
+  labelPos = 84)
+
+lollipopPlot(
+  big_maf,
+  gene = 'FGFR2',
+  AACol = 'aaChange',
+  showMutationRate = TRUE,
+  refSeqID = 'NM_001144914',
+  showDomainLabel = FALSE,
+  domainLabelSize = 1,
+  labelPos = 349)
+
+```
+
+```{r}
+# Characterises genomic loci with localized hyper-mutations. Such hyper mutated genomic regions can be visualized by plotting inter variant distance on a linear genomic scale.
+rainfallPlot(maf = big_maf, tsb = 'DDLPS', detectChangePoints = TRUE, pointSize = 0.6)
+
+
+```
+
+```{r}
+# Compares mutation load against TCGA cohorts
+big_maf.mutload = tcgaCompare(big_maf, cohortName = 'big_maf', logscale = TRUE, capture_size = 100)
+
+```
+
+
+
+```{r}
+# Mutually exclusive or co-occurring set of genes can be detected using somaticInteractions function, which performs pair-wise Fisher’s Exact test to detect such significant pair of genes
+somaticInteractions(big_maf, top = 50, pvalue = c(0.05, 0.1), fontSize = 0.6)
+
+```
+
+
+
+
+
+```{r}
+# plotOncodrive plots the results as scatter plot with size of the points proportional to the number of clusters found in the gene. X-axis shows number of mutations (or fraction of mutations) observed in these clusters. A single cluster with all mutations accumulated within that cluster gives it a cluster score of 1. 
+big_maf.sig = oncodrive(big_maf, AACol = 'aaChange', minMut = 5, pvalMethod = 'zscore')
+
+plotOncodrive(res = big_maf.sig, fdrCutOff = 0.05, bubbleSize = 0.5, useFraction = TRUE, labelSize = 0.5)
+
+```
+
+```{r}
+# pathways function checks for enrichment of known Oncogenic Signaling Pathways from TCGA cohorts
+pws = pathways(big_maf, plotType = 'bar')
+
+
+```
+
+```{r}
+plotPathways(maf = big_maf, pathlist = pws, showTumorSampleBarcodes = TRUE, SampleNamefontSize = 0.8, sampleOrder = c("UPS1", "UPS2", "UPS3", "DDLPS", "LMS1", "LMS2", "MFS1", "MFS2", "MFS3"), mar = c(7, 6, 3, 6))
+```
+
+```{r}
+# drugInteractions function checks for drug–gene interactions and gene drugability information compiled from Drug Gene Interaction database. Plot shows potential drugable gene categories along with upto top 5 genes involved in them. 
+dgi = drugInteractions(maf = big_maf, fontSize = 0.75)
+
+dgi = drugInteractions(maf = big_maf, fontSize = 0.75, drugs = TRUE)
+```
+
+```{r}
+# One can also extract information on drug-gene interactions. For example below is the results for known/reported drugs to interact with MUC16, SCN4A, CYP2D6 and TP53
+
+MUC16.dgi = drugInteractions(genes = "MUC16", drugs = TRUE)
+MUC16.dgi[,.(Gene, interaction_types, drug_name, drug_claim_name)]
+
+SCN4A.dgi = drugInteractions(genes = "SCN4A", drugs = TRUE)
+SCN4A.dgi[,.(Gene, interaction_types, drug_name, drug_claim_name)]
+
+CYP2D6.dgi = drugInteractions(genes = "CYP2D6", drugs = TRUE)
+CYP2D6.dgi[,.(Gene, interaction_types, drug_name, drug_claim_name)]
+
+TP53.dgi = drugInteractions(genes = "TP53", drugs = TRUE)
+TP53.dgi[,.(Gene, interaction_types, drug_name, drug_claim_name)]
+
+```
+
+
+
+
+```{r}
+library("BSgenome.Hsapiens.UCSC.hg38", quietly = TRUE)
+library('NMF')
+
+bigmaf.tnm = trinucleotideMatrix(maf = big_maf, add = TRUE, ref_genome = "BSgenome.Hsapiens.UCSC.hg38")
+
+
+```
+
+```{r}
+bigmaf.sign = estimateSignatures(mat = bigmaf.tnm, nTry = 9)
+
+plotCophenetic(res = bigmaf.sign)
+```
+
+
+
+```{r}
+bigmaf.sig = extractSignatures(mat = bigmaf.tnm, n = 3)
+
+bigmaf.og30.cosm = compareSignatures(nmfRes = bigmaf.sig, sig_db = "legacy")
+
+bigmaf.v3.cosm = compareSignatures(nmfRes = bigmaf.sig, sig_db = "SBS")
+```
+
+```{r}
+library('pheatmap')
+
+pheatmap::pheatmap(mat = bigmaf.og30.cosm$cosine_similarities, cluster_rows = FALSE, main = "cosine similarity against validated signatures OG30 COSMIC")
+
+pheatmap::pheatmap(mat = bigmaf.v3.cosm$cosine_similarities, cluster_rows = FALSE, main = "cosine similarity against validated signatures V3 COSMIC")
+```
+
+```{r}
+maftools::plotSignatures(nmfRes = bigmaf.sig, title_size = 1.2, sig_db = "SBS")
+
+maftools::plotSignatures(nmfRes = bigmaf.sig, title_size = 1.2, sig_db = "legacy")
+```
+
+
+
+```{r}
+plotSignatures(nmfRes = bigmaf.sig,
+               title_size = 0.8,
+               contributions = TRUE,
+               show_title = TRUE)
+```
+
+```{r}
+bigmaf.se = signatureEnrichment(maf = big_maf, 
+                              sig_res = bigmaf.sig)
+```
+
+
+
+```{r}
+## MAF + GISTIC integration with maftools (fully patched)
+## - Version-aware readGistic()
+## - Aligns sample IDs (dot/dash/uppercase)
+## - Creates cnTable & saves aligned matrices
+## - GISTIC plots + oncoplot (SNV±CN) with version checks
+## - Force gisticOncoPlot y-axis labels to use Cytoband (not Unique_Name)
+## - Unicode minus-safe CN casting
+## - Strict two-hit (LOF + CN loss) table
+## - CN burden summary
+## - Genome-wide CN heatmaps (continuous & thresholded) with explicit draw()
+
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(data.table)
+  library(readr)
+  library(stringr)
+  library(maftools)
+})
+
+## Paths
+gistic_dir <- normalizePath(
+  "G:/My Drive/Mim's Project/9. Bioinformatics/Nextflow SareK_WGS_all_REPEAT_CNV/results/variant_calling/controlfreec/GISTIC2/Broad",
+  winslash = "/", mustWork = TRUE
+)
+
+out_dir <- file.path(gistic_dir, "maftools_integration")
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+## Typical GISTIC output filenames (adjust if needed)
+g_all_lesions <- file.path(gistic_dir, "all_lesions.conf_90.txt")
+g_amp_genes   <- file.path(gistic_dir, "amp_genes.conf_90.txt")
+g_del_genes   <- file.path(gistic_dir, "del_genes.conf_90.txt")
+g_scores      <- file.path(gistic_dir, "scores.gistic")
+g_broad       <- file.path(gistic_dir, "broad_significance_results.txt")    # optional
+g_focal       <- file.path(gistic_dir, "focal_data_by_genes_broad.txt")           # thresholded -2..2
+if (!file.exists(g_focal)) {
+  alt <- file.path(gistic_dir, "all_thresholded.by_genes.txt")
+  if (file.exists(alt)) g_focal <- alt
+}
+g_allgenes    <- file.path(gistic_dir, "all_data_by_genes.txt")             # continuous log2 CN
+
+## Input presence checks (except optional g_broad)
+stopifnot(
+  file.exists(g_all_lesions),
+  file.exists(g_amp_genes),
+  file.exists(g_del_genes),
+  file.exists(g_scores),
+  file.exists(g_focal),
+  file.exists(g_allgenes)
+)
+
+## Ensure MAF is available
+if (!exists("big_maf")) {
+  stop("big_maf (maftools MAF object) not found. Load it with maftools::read.maf(...) first.")
+}
+
+## Helpers
+norm_ids <- function(x){
+  x %>% as.character() %>% stringr::str_trim()
+}
+
+first_col_to_Gene <- function(df){
+  n1 <- names(df)[1]
+  if (!identical(n1, "Gene")) names(df)[1] <- "Gene"
+  df
+}
+
+read_focal <- function(fp){
+  stopifnot(file.exists(fp))
+  focal <- suppressWarnings(fread(fp))
+  focal <- first_col_to_Gene(focal)
+  focal <- focal %>% distinct(Gene, .keep_all = TRUE)
+  focal
+}
+
+read_allgenes <- function(fp){
+  stopifnot(file.exists(fp))
+  X <- suppressWarnings(fread(fp))
+  X <- first_col_to_Gene(X)
+  X <- X %>% distinct(Gene, .keep_all = TRUE)
+  X
+}
+
+# Normalize Unicode minus (U+2212) to ASCII '-' and cast to integer safely
+to_int_safe <- function(x) {
+  x <- gsub("\u2212", "-", as.character(x), fixed = FALSE)
+  suppressWarnings(as.integer(x))
+}
+
+align_samples_simple <- function(maf_ids, gistic_ids){
+  # 1) Direct overlap
+  direct <- intersect(maf_ids, gistic_ids)
+  if (length(direct) > 0) {
+    return(list(keep = sort(direct), ren_focal = identity, ren_all = identity, ren_maf = identity))
+  }
+  # 2) dot <-> dash
+  maf_dd  <- stringr::str_replace_all(maf_ids, "\\.", "-")
+  gis_dd  <- stringr::str_replace_all(gistic_ids, "\\.", "-")
+  overlap <- intersect(maf_dd, gis_dd)
+  if (length(overlap) > 0){
+    ren_focal <- function(df){
+      nm <- names(df); nm[nm != "Gene"] <- stringr::str_replace_all(nm[nm != "Gene"], "\\.", "-"); names(df) <- nm; df
+    }
+    ren_all <- ren_focal
+    ren_maf <- function(mf){
+      mf@clinical.data$Tumor_Sample_Barcode <- stringr::str_replace_all(mf@clinical.data$Tumor_Sample_Barcode, "\\.", "-")
+      mf@data$Tumor_Sample_Barcode <- stringr::str_replace_all(mf@data$Tumor_Sample_Barcode, "\\.", "-")
+      mf
+    }
+    return(list(keep = sort(overlap), ren_focal = ren_focal, ren_all = ren_all, ren_maf = ren_maf))
+  }
+  # 3) Uppercase fallback
+  overlap2 <- intersect(toupper(maf_ids), toupper(gistic_ids))
+  if (length(overlap2) > 0){
+    ren_focal <- function(df){ names(df) <- c("Gene", toupper(names(df)[-1])); df }
+    ren_all   <- ren_focal
+    ren_maf   <- function(mf){
+      mf@clinical.data$Tumor_Sample_Barcode <- toupper(mf@clinical.data$Tumor_Sample_Barcode)
+      mf@data$Tumor_Sample_Barcode <- toupper(mf@data$Tumor_Sample_Barcode)
+      mf
+    }
+    return(list(keep = sort(overlap2), ren_focal = ren_focal, ren_all = ren_all, ren_maf = ren_maf))
+  }
+  stop("Could not align sample IDs between MAF and GISTIC; no overlap after dot/dash & uppercase.")
+}
+
+make_cnTable <- function(focal_df, keep_ids){
+  missing <- setdiff(keep_ids, names(focal_df))
+  if (length(missing) > 0) stop("GISTIC samples missing in focal matrix: ", paste(missing, collapse=", "))
+  focal_df %>%
+    select(c("Gene", all_of(keep_ids))) %>%
+    pivot_longer(-Gene, names_to = "Sample", values_to = "CN") %>%
+    mutate(CN = to_int_safe(CN)) %>%
+    filter(!is.na(CN)) %>%
+    select(Gene, Sample, CN)
+}
+
+## Load GISTIC matrices
+message("• Reading GISTIC gene matrices …")
+focal    <- read_focal(g_focal)        # thresholded -2..2 (discrete)
+allgenes <- read_allgenes(g_allgenes)  # continuous log2 CN
+
+## Align sample IDs between MAF and GISTIC
+maf_ids_raw    <- norm_ids(unique(big_maf@clinical.data$Tumor_Sample_Barcode))
+gistic_ids_raw <- norm_ids(setdiff(names(focal), "Gene"))
+
+aln <- align_samples_simple(maf_ids_raw, gistic_ids_raw)
+
+# Apply renamers for consistent IDs
+focal    <- aln$ren_focal(focal)
+allgenes <- aln$ren_all(allgenes)
+big_maf  <- aln$ren_maf(big_maf)
+
+keep_ids <- aln$keep
+message("Samples kept (", length(keep_ids), "): ", paste(keep_ids, collapse = ", "))
+
+# Subset MAF to aligned samples
+maf_sub <- subsetMaf(big_maf, tsb = keep_ids)
+
+# Build cnTable for oncoplots
+cnTable <- make_cnTable(focal, keep_ids)
+
+## Save aligned matrices
+readr::write_tsv(cnTable,          file.path(out_dir, "cnTable_thresholded.tsv"))
+focal_aligned    <- focal    %>% dplyr::select(Gene, dplyr::all_of(keep_ids)) %>% tibble::as_tibble()
+allgenes_aligned <- allgenes %>% dplyr::select(Gene, dplyr::all_of(keep_ids)) %>% tibble::as_tibble()
+readr::write_tsv(focal_aligned,    file.path(out_dir, "focal_data_by_genes_aligned.tsv"))
+readr::write_tsv(allgenes_aligned, file.path(out_dir, "all_data_by_genes_aligned.tsv"))
+
+## Build GISTIC object
+rg_formals <- names(formals(maftools::readGistic))
+rg_args <- list(
+  gisticAllLesionsFile = g_all_lesions,
+  gisticAmpGenesFile   = g_amp_genes,
+  gisticDelGenesFile   = g_del_genes,
+  gisticScoresFile     = g_scores
+)
+if ("gisticBroadSignificanceFile" %in% rg_formals && file.exists(g_broad)) {
+  rg_args$gisticBroadSignificanceFile <- g_broad
+}
+if ("isTCGA" %in% rg_formals)  rg_args$isTCGA  <- FALSE
+if ("is128K" %in% rg_formals)  rg_args$is128K  <- FALSE
+if ("verbose" %in% rg_formals) rg_args$verbose <- TRUE
+
+message("readGistic args used: ", paste(names(rg_args), collapse = ", "))
+gobj <- do.call(maftools::readGistic, rg_args)
+
+## PATCH: force gisticOncoPlot to show Cytoband labels on y-axis 
+# gisticOncoPlot prints colnames of a transformed version of gistic@numericMatrix,
+# i.e., it ultimately uses the *row names of gistic@numericMatrix* as the y-axis labels.
+# readGistic() stores peak IDs (Unique_Name) as those row names. We replace them
+# with the true Cytoband values—made unique to avoid duplicated rowname pitfalls.
+relabel_gistic_rows_with_cytoband <- function(g) {
+  stopifnot(inherits(g, "GISTIC"))
+  # Map from Unique_Name -> Cytoband (true band)
+  map_df <- as.data.frame(g@cytoband.summary, stringsAsFactors = FALSE)
+  need <- c("Unique_Name","Cytoband")
+  miss <- setdiff(need, colnames(map_df))
+  if (length(miss)) stop("Cytoband summary missing columns: ", paste(miss, collapse=", "))
+  key <- setNames(map_df$Cytoband, map_df$Unique_Name)
+
+  old <- rownames(g@numericMatrix)
+  new <- unname(key[old])
+  # Fallback to old label if mapping failed (shouldn’t normally)
+  new[is.na(new) | new == ""] <- old
+
+  # Ensure uniqueness to keep downstream subsetting stable
+  new_unique <- make.unique(new, sep = ".")
+
+  rownames(g@numericMatrix) <- new_unique
+  rownames(g@cnMatrix)      <- new_unique
+
+  # (Optional) keep the original labels around for reference
+  attr(g@numericMatrix, "original_peak_labels") <- old
+  attr(g@cnMatrix,      "original_peak_labels") <- old
+
+  message("Re-labelled GISTIC matrices: showing Cytoband on y-axis (", 
+          sum(new != old), " rows changed; ", 
+          sum(duplicated(new)) , " duplicates resolved).")
+  g
+}
+
+gobj <- relabel_gistic_rows_with_cytoband(gobj)
+
+# Save textual summary
+capture.output(gobj, file = file.path(out_dir, "gistic_peaks_summary.txt"))
+
+## GISTIC plots (version-aware)
+mf_exports <- getNamespaceExports("maftools")
+
+# Genome-wide chromosome view
+if ("gisticChromPlot" %in% mf_exports) {
+  png(file.path(out_dir, "gistic_chrom_plot.png"), width = 1600, height = 900, res = 150)
+  gisticChromPlot(gistic = gobj, markBands = "all")
+  dev.off()
+} else if ("plotGistic" %in% mf_exports) {
+  png(file.path(out_dir, "gistic_peaks_genomewide.png"), width = 1600, height = 900, res = 150)
+  plotGistic(gisticData = gobj, markBands = "all")
+  dev.off()
+} else {
+  message("No gisticChromPlot/plotGistic found in maftools; skipping the genome-wide plot.")
+}
+
+# Bubble plot of significant peaks
+if ("gisticBubblePlot" %in% mf_exports) {
+  png(file.path(out_dir, "gistic_bubble_plot.png"), width = 1400, height = 1000, res = 150)
+  gisticBubblePlot(gistic = gobj)
+  dev.off()
+}
+
+## gisticOncoPlot with custom cell height & font sizes
+if ("gisticOncoPlot" %in% mf_exports) {
+  # >>> knobs you can change <<<
+  CELL_H_MM    <- 8      # per-row cell height (mm)
+  CELL_W_MM    <- 20      # per-column cell width  (mm) – optional auto width
+  ROW_FONTSIZE <- 12     # y-axis (peak) labels
+  COL_FONTSIZE <- 14     # x-axis (sample) labels
+  RES_PNG      <- 600    # device resolution (ppi)
+
+  # rows actually drawn (top) – use min(100, nrow)
+  n_rows_plot <- min(100L, nrow(gobj@numericMatrix))
+  n_cols_plot <- length(keep_ids)
+
+  # compute device size from desired cell mm
+  height_px <- round((n_rows_plot * CELL_H_MM) / 25.4 * RES_PNG) + 300  # add padding
+  width_px  <- round((n_cols_plot * CELL_W_MM) / 25.4 * RES_PNG) + 600  # add padding
+
+  # set font sizes for ComplexHeatmap globally during this plot
+  suppressPackageStartupMessages({ library(ComplexHeatmap); library(grid) })
+  ComplexHeatmap::ht_opt(
+    heatmap_row_names_gp    = grid::gpar(fontsize = ROW_FONTSIZE),
+    heatmap_column_names_gp = grid::gpar(fontsize = COL_FONTSIZE)
+  )
+
+  png(file.path(out_dir, "gistic_oncoplot_top100.png"),
+      width = width_px, height = height_px, res = RES_PNG)
+  gisticOncoPlot(
+    gistic = gobj,
+    showTumorSampleBarcodes = TRUE,
+    sampleOrder = keep_ids,
+    top = 100
+  )
+  dev.off()
+
+  # reset ComplexHeatmap options (so other plots unaffected)
+  ComplexHeatmap::ht_opt(RESET = TRUE)
+}
+
+##  Oncoplot: SNVs/indels (MAF) + CN (GISTIC) 
+# Define genes_to_plot if not provided: top 25 mutated genes in aligned MAF
+if (!exists("genes_to_plot") || length(genes_to_plot) == 0) {
+  gs <- getGeneSummary(maf_sub)
+  genes_to_plot <- head(gs$Hugo_Symbol[order(gs$total, decreasing = TRUE)], 25)
+  readr::write_tsv(tibble(default_genes_to_plot = genes_to_plot),
+                   file.path(out_dir, "genes_to_plot_default_top25.tsv"))
+}
+
+oncoplot_has_cn <- "cnTable" %in% names(formals(maftools::oncoplot))
+has_sampleOrder <- "sampleOrder" %in% names(formals(maftools::oncoplot))
+
+if (oncoplot_has_cn) {
+  png(file.path(out_dir, "oncoplot_snv_cn.png"), width=2200, height=1400, res=180)
+  args <- list(
+    maf = maf_sub,
+    genes = genes_to_plot,
+    drawRowBar = TRUE,
+    removeNonMutated = FALSE,
+    sortByAnnotation = FALSE,
+    cnTable = cnTable
+  )
+  if (has_sampleOrder) args$sampleOrder <- keep_ids
+  do.call(oncoplot, args)
+  dev.off()
+} else {
+  message("maftools::oncoplot() has no 'cnTable' in this version; creating SNV-only oncoplot + separate CN heatmap.")
+  # 1) SNV-only oncoplot
+  png(file.path(out_dir, "oncoplot_snv_only.png"), width=2200, height=1400, res=180)
+  args <- list(
+    maf = maf_sub,
+    genes = genes_to_plot,
+    drawRowBar = TRUE,
+    removeNonMutated = FALSE,
+    sortByAnnotation = FALSE
+  )
+  if (has_sampleOrder) args$sampleOrder <- keep_ids
+  do.call(oncoplot, args)
+  dev.off()
+
+  # 2) CN heatmap (GISTIC thresholded -2..2) for the same genes/samples
+  cn_wide <- cnTable |>
+    dplyr::filter(Gene %in% genes_to_plot, Sample %in% keep_ids) |>
+    dplyr::mutate(Gene = factor(Gene, levels = genes_to_plot),
+                  Sample = factor(Sample, levels = keep_ids)) |>
+    tidyr::pivot_wider(names_from = Sample, values_from = CN) |>
+    arrange(Gene)
+
+  rn <- as.character(cn_wide$Gene)
+  cn_mat <- as.matrix(cn_wide[,-1, drop=FALSE])
+  rownames(cn_mat) <- rn
+  cn_mat[is.na(cn_mat)] <- 0L
+
+  if (!requireNamespace("ComplexHeatmap", quietly = TRUE) ||
+      !requireNamespace("circlize", quietly = TRUE)) {
+    readr::write_tsv(
+      as.data.frame(cbind(Gene=rownames(cn_mat), cn_mat)),
+      file.path(out_dir, "heatmap_cn_only.matrix.tsv")
+    )
+    message("Saved CN matrix to 'heatmap_cn_only.matrix.tsv'. Install ComplexHeatmap for a figure:\n",
+            "  BiocManager::install(c('ComplexHeatmap','circlize'))")
+  } else {
+    suppressPackageStartupMessages({ library(ComplexHeatmap); library(circlize); library(grid) })
+    # Discrete mapping (factor levels fixed & named colors)
+    levels_disc <- c("-2","-1","0","1","2")
+    cn_mat_chr <- apply(cn_mat, 2, function(x) {
+      y <- as.character(as.integer(x)); y[!y %in% levels_disc] <- "0"; y
+    })
+    cn_colors <- setNames(c("#2166AC","#67A9CF","#F7F7F7","#F4A582","#CA0020"), levels_disc)
+
+    png(file.path(out_dir, "heatmap_cn_only.png"), width=1600, height=1200, res=160)
+    ht_tmp <- Heatmap(
+      cn_mat_chr, name="CN", col=cn_colors,
+      cluster_rows=FALSE, cluster_columns=FALSE,
+      show_row_names=TRUE, show_column_names=TRUE,
+      column_title="GISTIC thresholded CN (-2..2)",
+      heatmap_legend_param = list(at = levels_disc, labels = levels_disc),
+      na_col = "#DDDDDD",
+      use_raster = FALSE  # important for discrete character matrices
+    )
+    draw(ht_tmp, heatmap_legend_side = "right", annotation_legend_side = "right")
+    dev.off()
+  }
+}
+
+## Two-hit TSG flags (LOF mutation + CN loss)
+lof_classes <- c(
+  "Nonsense_Mutation",
+  "Frame_Shift_Del", "Frame_Shift_Ins",
+  "Splice_Site",
+  "Translation_Start_Site",
+  "Nonstop_Mutation",
+  "Stop_Gained", "Stop_Codon_Del", "Stop_Codon_Ins",
+  "Start_Codon_Del", "Start_Codon_SNP"
+)
+
+maf_lof <- maf_sub@data %>%
+  filter(Variant_Classification %in% lof_classes) %>%
+  transmute(Gene = Hugo_Symbol, Sample = Tumor_Sample_Barcode) %>%
+  distinct() %>% mutate(LOF = 1L)
+
+cn_loss <- cnTable %>%
+  filter(CN <= -1) %>%  # set to <= -2 for stricter bi-allelic loss
+  transmute(Gene, Sample, LOSS = 1L) %>%
+  distinct()
+
+two_hit <- full_join(maf_lof, cn_loss, by = c("Gene","Sample")) %>%
+  mutate(two_hit = ifelse(!is.na(LOF) & !is.na(LOSS), 1L, 0L)) %>%
+  filter(two_hit == 1L) %>%
+  arrange(Gene, Sample)
+
+readr::write_tsv(two_hit, file.path(out_dir, "two_hit_TSG_flags.tsv"))
+
+## CN burden per sample (QC)
+cn_burden <- cnTable %>%
+  mutate(state = case_when(
+    CN >=  1 ~ "gain",
+    CN <= -1 ~ "loss",
+    TRUE     ~ "neutral"
+  )) %>%
+  filter(state != "neutral") %>%
+  count(Sample, state) %>%
+  tidyr::pivot_wider(names_from = state, values_from = n, values_fill = 0) %>%
+  mutate(total = coalesce(gain,0) + coalesce(loss,0)) %>%
+  arrange(desc(total))
+
+readr::write_tsv(cn_burden, file.path(out_dir, "cn_burden_by_sample.tsv"))
+
+## Genome-wide CN heatmaps (continuous & thresholded)
+compute_order <- function(ag_full, genes_in_matrix) {
+  df <- as.data.frame(ag_full)
+  names(df)[1] <- "Gene"
+  df <- df[df$Gene %in% genes_in_matrix, , drop = FALSE]
+
+  nl <- tolower(names(df))
+  chr_idx   <- which(nl %in% c("chromosome","chr","chrom"))
+  start_idx <- which(nl %in% c("start","txstart","gene_start","start_position","start.bp"))
+  cyto_idx  <- which(nl %in% c("cytoband","cyto_band","cyto"))
+
+  if (length(chr_idx) > 0) {
+    chr <- toupper(gsub("^chr", "", as.character(df[[chr_idx[1]]])))
+    chr_levels <- c(as.character(1:22), "X","Y","M")
+    chr_fac <- factor(chr, levels = chr_levels, ordered = TRUE)
+    if (length(start_idx) > 0) {
+      pos <- suppressWarnings(as.numeric(df[[start_idx[1]]]))
+    } else if (length(cyto_idx) > 0) {
+      cy <- as.character(df[[cyto_idx[1]]])
+      pos <- suppressWarnings(as.numeric(sub("^[0-9XYM]+[pq]", "", toupper(cy))))
+    } else {
+      pos <- seq_len(nrow(df))
+    }
+    ord <- order(chr_fac, pos, df$Gene, na.last = TRUE)
+    gene_order <- df$Gene[ord]
+    row_split  <- chr_fac[ord]
+  } else if (length(cyto_idx) > 0) {
+    cy <- as.character(df[[cyto_idx[1]]])
+    chr_str <- toupper(sub("^([0-9]{1,2}|X|Y|M).*", "\\1", cy))
+    chr_levels <- c(as.character(1:22), "X","Y","M")
+    chr_fac <- factor(chr_str, levels = chr_levels, ordered = TRUE)
+    arm_fac <- factor(ifelse(grepl("[pP]", cy), "p", "q"), levels = c("p","q"), ordered = TRUE)
+    band_num <- suppressWarnings(as.numeric(sub("^[0-9XYM]+[pq]", "", toupper(cy))))
+    ord <- order(chr_fac, arm_fac, band_num, df$Gene, na.last = TRUE)
+    gene_order <- df$Gene[ord]
+    row_split  <- chr_fac[ord]
+  } else {
+    gene_order <- sort(unique(genes_in_matrix))
+    row_split  <- NULL
+  }
+
+  gene_order <- intersect(gene_order, genes_in_matrix)
+  if (!is.null(row_split)) {
+    rs_df <- data.frame(Gene = df$Gene[ord], split = as.character(row_split), stringsAsFactors = FALSE)
+    row_split <- factor(rs_df$split[match(gene_order, rs_df$Gene)], levels = unique(rs_df$split))
+  }
+  list(order = gene_order, split = row_split)
+}
+
+# Re-read all_data_by_genes with all columns available
+ag_full <- suppressWarnings(data.table::fread(g_allgenes))
+names(ag_full)[1] <- "Gene"
+
+# CONTINUOUS log2 CN heatmap (all genes x all samples)
+cont_genes_avail <- intersect(allgenes_aligned$Gene, ag_full$Gene)
+ord_cont <- compute_order(ag_full, cont_genes_avail)
+
+cont_wide <- allgenes_aligned %>%
+  dplyr::filter(Gene %in% ord_cont$order) %>%
+  dplyr::mutate(Gene = factor(Gene, levels = ord_cont$order)) %>%
+  dplyr::arrange(Gene) %>%
+  dplyr::mutate(dplyr::across(all_of(keep_ids), ~ suppressWarnings(as.numeric(.))))
+
+mat_cont <- as.matrix(cont_wide %>% dplyr::select(all_of(keep_ids)))
+rownames(mat_cont) <- as.character(cont_wide$Gene)
+
+# Drop rows that are entirely NA
+keep_rows <- rowSums(is.finite(mat_cont)) > 0
+mat_cont  <- mat_cont[keep_rows, , drop = FALSE]
+row_split_cont <- if (!is.null(ord_cont$split)) ord_cont$split[keep_rows] else NULL
+
+# Cap extreme values for visibility
+cap <- 2
+mat_cont[!is.finite(mat_cont)] <- NA_real_
+mat_cont <- pmax(pmin(mat_cont, cap), -cap)
+
+# DISCRETE thresholded (-2..2) heatmap from focal data
+disc_genes_avail <- intersect(focal_aligned$Gene, ag_full$Gene)
+ord_disc <- compute_order(ag_full, disc_genes_avail)
+
+foc_wide <- focal_aligned %>%
+  dplyr::filter(Gene %in% ord_disc$order) %>%
+  dplyr::mutate(Gene = factor(Gene, levels = ord_disc$order)) %>%
+  dplyr::arrange(Gene)
+
+mat_disc <- as.matrix(foc_wide %>%
+                        dplyr::select(all_of(keep_ids)))
+rownames(mat_disc) <- as.character(foc_wide$Gene)
+mat_disc <- apply(mat_disc, 2, to_int_safe)
+mat_disc[is.na(mat_disc)] <- 0L
+keep_rows_disc <- rowSums(abs(mat_disc) > 0) > 0
+mat_disc <- mat_disc[keep_rows_disc, , drop = FALSE]
+row_split_disc <- if (!is.null(ord_disc$split)) ord_disc$split[keep_rows_disc] else NULL
+
+# QC log
+qc <- list(
+  cont_dim = dim(mat_cont),
+  cont_nonNA = sum(!is.na(mat_cont)),
+  disc_dim = dim(mat_disc),
+  disc_nonzero = sum(abs(mat_disc) > 0)
+)
+capture.output(str(qc), file = file.path(out_dir, "heatmap_genomewide_qc.txt"))
+
+# Render (or save matrices if ComplexHeatmap absent)
+if (!requireNamespace("ComplexHeatmap", quietly = TRUE) ||
+    !requireNamespace("circlize", quietly = TRUE)) {
+  readr::write_tsv(
+    as.data.frame(cbind(Gene = rownames(mat_cont), mat_cont)),
+    file.path(out_dir, "heatmap_cn_genomewide_continuous.matrix.tsv")
+  )
+  readr::write_tsv(
+    as.data.frame(cbind(Gene = rownames(mat_disc), mat_disc)),
+    file.path(out_dir, "heatmap_cn_genomewide_thresholded.matrix.tsv")
+  )
+  message("Saved CN matrices. Install ComplexHeatmap to render heatmaps.")
+} else {
+  suppressPackageStartupMessages({ library(ComplexHeatmap); library(circlize); library(grid) })
+
+  # Continuous (log2) heatmap (raster = TRUE is fine here)
+  if (nrow(mat_cont) > 0) {
+    col_fun <- circlize::colorRamp2(c(-cap, 0, cap), c("#2166AC", "#F7F7F7", "#B2182B"))
+    png(file.path(out_dir, "heatmap_cn_genomewide_continuous.png"),
+        width = 2000, height = 2600, res = 160)
+    ht <- Heatmap(
+      mat_cont,
+      name = "log2CN",
+      col = col_fun,
+      cluster_rows = FALSE, cluster_columns = FALSE,
+      show_row_names = FALSE, show_column_names = TRUE,
+      row_split = row_split_cont,
+      column_title = "Genome-wide copy number (continuous log2 ratio)",
+      use_raster = TRUE, raster_quality = 2,
+      na_col = "#DDDDDD"
+    )
+    draw(ht, heatmap_legend_side = "right", annotation_legend_side = "right")
+    dev.off()
+  } else {
+    message("Continuous heatmap skipped: matrix has 0 rows after cleaning.")
+  }
+
+  # Thresholded (-2..2) heatmap (raster = FALSE for discrete char matrix)
+  if (nrow(mat_disc) > 0) {
+    levels_disc <- c("-2","-1","0","1","2")
+    mat_disc_chr <- apply(mat_disc, 2, function(x) {
+      y <- as.character(as.integer(x)); y[!y %in% levels_disc] <- "0"; y
+    })
+    cn_colors <- setNames(c("#2166AC","#67A9CF","#F7F7F7","#F4A582","#CA0020"), levels_disc)
+
+    png(file.path(out_dir, "heatmap_cn_genomewide_thresholded.png"),
+        width = 2000, height = 2600, res = 160)
+    ht2 <- Heatmap(
+      mat_disc_chr,
+      name = "CN",
+      col = cn_colors,
+      cluster_rows = FALSE, cluster_columns = FALSE,
+      show_row_names = FALSE, show_column_names = TRUE,
+      row_split = row_split_disc,
+      column_title = "Genome-wide copy number (thresholded -2..2)",
+      heatmap_legend_param = list(at = levels_disc, labels = levels_disc),
+      na_col = "#DDDDDD",
+      use_raster = FALSE
+    )
+    draw(ht2, heatmap_legend_side = "right", annotation_legend_side = "right")
+    dev.off()
+  } else {
+    message("Thresholded heatmap skipped: matrix has 0 rows after cleaning.")
+  }
+}
+
+## Session info & done
+capture.output(sessionInfo(), file = file.path(out_dir, "sessionInfo.txt"))
+message("✅ Integration complete. Outputs in: ", out_dir)
+
+```
+
